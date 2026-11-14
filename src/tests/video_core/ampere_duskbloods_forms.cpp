@@ -149,6 +149,35 @@ TEST_CASE("Ampere IMAD.WIDE with a uniform addend shadows its high registers",
     REQUIRE(pressure.suffix.size() == 8);
 }
 
+TEST_CASE("Ampere SEL and FSEL with a uniform source shadow their high registers",
+          "[video_core][ampere]") {
+    for (const u32 opcode : {0xc07U, 0xc08U}) {
+        // SEL / FSEL R204, R205, UR10, !P3 with registers from R200 up shadowed.
+        const Instruction select{{0xcdcc7000U | opcode, 0x0000000a, 0x0d800000, 0x000fe400}};
+        const auto pressure = Shader::Ampere::PrepareRegisterPressure(select, 200);
+        REQUIRE(pressure.valid);
+        // Rd and Ra move to one borrowed low quartet; the uniform source stays.
+        const u32 borrowed = pressure.instruction.Bits(16, 8);
+        REQUIRE(borrowed < 200);
+        REQUIRE(borrowed % 4 == 0);
+        REQUIRE(pressure.instruction.Bits(24, 8) == borrowed + 1);
+        REQUIRE(pressure.instruction.Bits(32, 6) == 10);
+        REQUIRE(pressure.prefix.size() == 8);
+        REQUIRE(pressure.suffix.size() == 8);
+    }
+    // A program using the uniform bank lowers FSEL R220, R221, UR10, !P3 through the shadow.
+    const auto lowered = LowerToMaxwell(
+        std::array{Instruction{{0xdddc7c08, 0x0000000a, 0x0d800000, 0x000fe400}}, Exit});
+    INFO(lowered.error);
+    REQUIRE(lowered);
+    const auto select = std::find_if(lowered.instructions.begin(), lowered.instructions.end(),
+                                     [](u64 word) { return (word >> 48) == 0x5ca0; });
+    REQUIRE(select != lowered.instructions.end());
+    REQUIRE((*select & 0xff) < 216);
+    REQUIRE(((*select >> 8) & 0xff) == (*select & 0xff) + 1);
+    REQUIRE(((*select >> 20) & 0xff) == 226); // UR10's mirror
+}
+
 TEST_CASE("Ampere task programs read back their payload", "[video_core][ampere]") {
     // GXFlver_Common_MeshletAS: ISBERD.O.ATTR.32 R0, [RZ + 0x14].
     const auto lowered = LowerToMaxwell(
