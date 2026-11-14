@@ -1135,6 +1135,26 @@ TEST_CASE("Native reads through a loaded pointer whose holder the program writes
     CHECK(records.fixture.program.info.native_global_bounds);
 }
 
+TEST_CASE("Native reads through a loaded pointer stay global beside a store not tracked to a buffer",
+          "[shader][storage_buffer]") {
+    LoadedPointerRecords records;
+    IR::IREmitter ir{records.fixture.entry};
+    IR::U32 high;
+    const IR::U32 low{records.LoadedLow(ir, high)};
+    ir.SetReg(IR::Reg::R0,
+              ir.LoadGlobal32(Address(ir, ir.IAdd(low, LoadedPointerRecords::RecordOffset(ir)),
+                                      high)));
+    // A store whose address no constant buffer pointer gives: it stays global, and the backend
+    // routes it among every binding, the pointer's holder included.
+    ir.WriteGlobal32(Address(ir, ir.LocalInvocationIdX(), ir.Imm32(0)), ir.Imm32(0));
+    records.fixture.TrackedOffsets();
+
+    CHECK(records.Count(IR::Opcode::WriteGlobal32) == 1);
+    CHECK_FALSE(ReadsFromLoadedPointer(records, low));
+    CHECK(records.Count(IR::Opcode::LoadGlobal32) == 1);
+    CHECK(records.fixture.program.info.native_global_bounds);
+}
+
 TEST_CASE("An address offset that doesn't fit 32 bits keeps the access global",
           "[shader][storage_buffer]") {
     const auto read = [](u64 imm) {

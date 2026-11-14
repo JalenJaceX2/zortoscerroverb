@@ -2578,15 +2578,17 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
     // A read rebased on a pointer loaded from memory reads the binding of the pointer the buffer
     // holding it had when the draw or dispatch was bound. Where the program writes that holder,
     // what the read loads can be another pointer: those reads stay global, routed at run time
-    // among the bindings collected for them (the pointer's and its holder's).
+    // among the bindings collected for them (the pointer's and its holder's). A store that stayed
+    // global without a buffer can write the holder too: the backend routes it among every binding.
     info.to_replace.erase(
         std::remove_if(info.to_replace.begin(), info.to_replace.end(),
                        [&info](const StorageInst& storage_inst) {
                            return !storage_inst.loaded_pointer.IsEmpty() &&
-                                  info.writes.contains(StorageBufferAddr{
-                                      .index = storage_inst.storage_buffer.index,
-                                      .offset = storage_inst.storage_buffer.offset,
-                                  });
+                                  (info.untracked_writes ||
+                                   info.writes.contains(StorageBufferAddr{
+                                       .index = storage_inst.storage_buffer.index,
+                                       .offset = storage_inst.storage_buffer.offset,
+                                   }));
                        }),
         info.to_replace.end());
     program.info.native_global_bounds |= info.native_runtime_bounds;
