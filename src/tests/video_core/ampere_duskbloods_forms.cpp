@@ -178,6 +178,31 @@ TEST_CASE("Ampere SEL and FSEL with a uniform source shadow their high registers
     REQUIRE(((*select >> 20) & 0xff) == 226); // UR10's mirror
 }
 
+TEST_CASE("Ampere wide destinations that reach the high uniforms' registers are shadowed",
+          "[video_core][ampere]") {
+    const auto copies = [](const Shader::Ampere::LoweredProgram& lowered) {
+        return std::count_if(lowered.instructions.begin(), lowered.instructions.end(),
+                             [](u64 word) { return (word >> 48) == 0x5c98; });
+    };
+    // With the uniform bank (FSEL R4, R5, UR10, !P3) and two high uniforms, UR28 lives at R214:
+    // LDS.128 R212, [R0] writes it. Shadowing works in groups of four, so lowering asks for four.
+    const std::array code{Instruction{{0x05047c08, 0x0000000a, 0x0d800000, 0x000fe400}},
+                          Instruction{{0x00d47984, 0, 0xc00, 0}}, Exit};
+    const auto unaligned = Shader::Ampere::LowerToMaxwellWith(code, 2);
+    REQUIRE(!unaligned);
+    REQUIRE(unaligned.high_uniform_registers == 4);
+    // Then R212-R215 hold UR28-UR31, and the load goes through a borrowed low quartet.
+    const auto lowered = Shader::Ampere::LowerToMaxwellWith(code, 4);
+    INFO(lowered.error);
+    REQUIRE(lowered);
+    REQUIRE(copies(lowered) == 16);
+    // Without high uniforms R212-R215 are below the uniform bank's registers: no shadow.
+    const auto below = Shader::Ampere::LowerToMaxwellWith(code, 0);
+    INFO(below.error);
+    REQUIRE(below);
+    REQUIRE(copies(below) == 0);
+}
+
 TEST_CASE("Ampere task programs read back their payload", "[video_core][ampere]") {
     // GXFlver_Common_MeshletAS: ISBERD.O.ATTR.32 R0, [RZ + 0x14].
     const auto lowered = LowerToMaxwell(

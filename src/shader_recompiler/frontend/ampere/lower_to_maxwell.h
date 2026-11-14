@@ -317,6 +317,23 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             if (reg >= (uses_uniform_bank ? high_uniform_base : 246U) && reg < 255)
                 requires_shadow = true;
         }
+        // A wide destination that starts below the high uniforms' registers and reaches them
+        // writes them too (LDS.128 R212 with UR28 at R214). Shadowing lowers again with their
+        // base rounded down to a multiple of four, which no aligned pair or quad then crosses.
+        // Without the uniform bank, wide values may end in R246 and R247 (spills do on purpose).
+        if (uses_uniform_bank && opcode != 0x81c) {
+            u32 written = write_count(insn).value_or(1);
+            std::vector<RegisterOperand> register_operands;
+            if (RegisterOperands(insn, register_operands)) {
+                for (const auto [bit, count] : register_operands) {
+                    if (bit == 16)
+                        written = (std::max)(written, count);
+                }
+            }
+            const u32 destination = insn.Bits(16, 8);
+            if (destination < 255 && written > 0 && destination + written > high_uniform_base)
+                requires_shadow = true;
+        }
         if (requires_shadow) {
             if (uses_uniform_bank && (high_uniform_base & 3)) {
                 // Shadowing works in aligned groups of four: lower again with the high uniform
