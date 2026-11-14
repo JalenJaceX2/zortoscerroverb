@@ -1536,12 +1536,19 @@ const IR::Inst* CarryOf(const IR::Inst& select, std::span<const IR::Inst* const>
 /// once), and nothing else.
 bool HighFromLoadedPointer(const IR::Value& high, const LoadedPointer& pointer) {
     const IR::Inst* const load{pointer.low.InstRecursive()->Arg(0).InstRecursive()};
-    // Whether the low word's null phi takes zero from a predecessor.
-    const auto null_from = [&](const IR::Block* predecessor) -> std::optional<bool> {
+    // What a null merge takes from a predecessor: null, the address (its high word, for the high
+    // word's merge), or its own value, as a loop carries it.
+    enum class Edge { Null, Address, Carried };
+    // What the low word's null phi takes from a predecessor.
+    const auto low_edge = [&](const IR::Block* predecessor) -> std::optional<Edge> {
         for (size_t arg = 0; arg < pointer.null_phi->NumArgs(); ++arg) {
             if (pointer.null_phi->PhiBlock(arg) == predecessor) {
                 const IR::Value operand{pointer.null_phi->Arg(arg).Resolve()};
-                return operand.IsImmediate();
+                if (operand.IsImmediate()) {
+                    return Edge::Null;
+                }
+                return operand.InstRecursive() == pointer.null_phi ? Edge::Carried
+                                                                    : Edge::Address;
             }
         }
         return std::nullopt;
@@ -1607,15 +1614,19 @@ bool HighFromLoadedPointer(const IR::Value& high, const LoadedPointer& pointer) 
                 nonzero = operand;
             }
             if (has_zero && pointer.null_phi != nullptr) {
+                // Each edge takes what the low word's takes: zero where it is null, and its own
+                // value where the low word carries its own (the pair from the last iteration).
                 for (size_t arg = 0; arg < inst->NumArgs(); ++arg) {
                     const IR::Value operand{inst->Arg(arg).Resolve()};
+                    Edge edge{Edge::Address};
                     if (!operand.IsImmediate() && operand.InstRecursive() == inst) {
-                        continue;
+                        edge = Edge::Carried;
+                    } else if (operand.IsImmediate() && operand.Type() == IR::Type::U32 &&
+                               operand.U32() == 0) {
+                        edge = Edge::Null;
                     }
-                    const bool zero{operand.IsImmediate() && operand.Type() == IR::Type::U32 &&
-                                    operand.U32() == 0};
-                    if (null_from(inst->PhiBlock(arg)) != std::optional<bool>{zero}) {
-                        // Not zero on exactly the low word's null paths
+                    if (low_edge(inst->PhiBlock(arg)) != edge) {
+                        // Not in step with the low word on that edge
                         return false;
                     }
                 }

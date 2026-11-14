@@ -961,6 +961,39 @@ struct PointerOrNullRead {
         records.fixture.TrackedOffsets();
     }
 
+    /// What a word of the merged address takes on the loop's own edge.
+    enum class Edge { Carried, Null, Pointer };
+
+    /// `exit` loops on itself, the low and high words taking low_edge and high_edge on that edge.
+    void BuildLoop(Edge low_edge, Edge high_edge) {
+        records.fixture.env.SetStage(Shader::Stage::Fragment);
+        records.fixture.entry.AddBranch(&records.body);
+        records.fixture.entry.AddBranch(&records.exit);
+        records.body.AddBranch(&records.exit);
+        records.exit.AddBranch(&records.exit);
+        records.SetBlocks({&records.fixture.entry, &records.body, &records.exit});
+        IR::IREmitter ir{records.fixture.entry};
+        IR::U32 high;
+        low = records.LoadedLow(ir, high);
+        const IR::U32 record_low{ir.IAdd(low, LoadedPointerRecords::RecordOffset(ir))};
+        const auto merge = [&](const IR::U32& pointer, Edge edge) {
+            records.exit.AppendNewInst(IR::Opcode::Phi, {});
+            IR::Inst* const phi{&records.exit.back()};
+            phi->SetFlags(IR::Type::U32);
+            phi->AddPhiOperand(&records.body, pointer);
+            phi->AddPhiOperand(&records.fixture.entry, IR::Value{0U});
+            phi->AddPhiOperand(&records.exit, edge == Edge::Carried ? IR::Value{phi}
+                                              : edge == Edge::Null  ? IR::Value{0U}
+                                                                    : IR::Value{pointer});
+            return IR::U32{IR::Value{phi}};
+        };
+        const IR::U32 address_low{merge(record_low, low_edge)};
+        const IR::U32 address_high{merge(high, high_edge)};
+        IR::IREmitter exit{records.exit};
+        exit.SetReg(IR::Reg::R0, exit.LoadGlobal32(Address(exit, address_low, address_high)));
+        records.fixture.TrackedOffsets();
+    }
+
     /// Whether the read became the pointer-or-null read (a select of the binding's read and 0).
     bool ReadsPointerOrNull() const {
         if (records.Count(IR::Opcode::LoadGlobal32) != 0) {
@@ -1030,6 +1063,25 @@ TEST_CASE("A pointer or null takes carries only from the additions down to the p
     PointerOrNullRead offset;
     offset.Build(true, false, false, PointerOrNullRead::Carry::Offset);
     CHECK_FALSE(offset.ReadsPointerOrNull());
+}
+
+TEST_CASE("A pointer or null a loop carries keeps both words in step on the loop's edge",
+          "[shader][storage_buffer]") {
+    using Edge = PointerOrNullRead::Edge;
+    const auto reads_pointer_or_null = [](Edge low_edge, Edge high_edge) {
+        PointerOrNullRead read;
+        read.BuildLoop(low_edge, high_edge);
+        return read.ReadsPointerOrNull();
+    };
+    // Both words carried round the loop, or both null on its edge: the address is still the
+    // pointer's or null.
+    CHECK(reads_pointer_or_null(Edge::Carried, Edge::Carried));
+    CHECK(reads_pointer_or_null(Edge::Null, Edge::Null));
+    // The high word carried while the low word is null or the pointer's on the same edge, and
+    // the low word carried while the high word is the pointer's: neither the pointer nor null.
+    CHECK_FALSE(reads_pointer_or_null(Edge::Null, Edge::Carried));
+    CHECK_FALSE(reads_pointer_or_null(Edge::Pointer, Edge::Carried));
+    CHECK_FALSE(reads_pointer_or_null(Edge::Carried, Edge::Pointer));
 }
 
 TEST_CASE("Iterator analysis handles deep loop-carried shader graphs",
