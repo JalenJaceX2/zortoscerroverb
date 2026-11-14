@@ -7,6 +7,7 @@
 #include <array>
 #include <bit>
 #include <deque>
+#include <limits>
 #include <map>
 #include <optional>
 #include <span>
@@ -367,6 +368,17 @@ struct LowAddrInfo {
     s32 imm_offset;
 };
 
+/// An immediate an IAdd64 adds to an address, as the signed 32-bit offset the tracking takes, or
+/// nothing when it doesn't fit one (it would move the address by another amount).
+std::optional<s32> ImmediateAddressOffset(u64 value) {
+    const s64 offset{static_cast<s64>(value)};
+    if (offset < s64{(std::numeric_limits<s32>::min)()} ||
+        offset > s64{(std::numeric_limits<s32>::max)()}) {
+        return std::nullopt;
+    }
+    return static_cast<s32>(offset);
+}
+
 /// Tries to track the first 32-bits of a global memory instruction
 std::optional<LowAddrInfo> TrackLowAddress(IR::Inst* inst) {
     // The first argument is the low level GPU pointer to the global memory instruction
@@ -386,7 +398,11 @@ std::optional<LowAddrInfo> TrackLowAddress(IR::Inst* inst) {
         if (!imm_offset_value.IsImmediate()) {
             return std::nullopt;
         }
-        imm_offset = static_cast<s32>(static_cast<s64>(imm_offset_value.U64()));
+        const std::optional<s32> offset{ImmediateAddressOffset(imm_offset_value.U64())};
+        if (!offset) {
+            return std::nullopt;
+        }
+        imm_offset = *offset;
         const IR::U64 iadd_addr{addr_inst->Arg(0)};
         if (iadd_addr.IsImmediate()) {
             return std::nullopt;
@@ -1244,8 +1260,12 @@ small_vector<StorageBufferAddr, 4> NativePointerCandidates(const IR::U32& low_ad
                 if (!address.IsImmediate() &&
                     address.InstRecursive()->GetOpcode() == IR::Opcode::IAdd64 &&
                     address.InstRecursive()->Arg(1).IsImmediate()) {
-                    holder_offset =
-                        static_cast<s32>(static_cast<s64>(address.InstRecursive()->Arg(1).U64()));
+                    const std::optional<s32> offset{
+                        ImmediateAddressOffset(address.InstRecursive()->Arg(1).U64())};
+                    if (!offset) {
+                        break;
+                    }
+                    holder_offset = *offset;
                     address = address.InstRecursive()->Arg(0);
                 }
                 if (address.IsImmediate() ||

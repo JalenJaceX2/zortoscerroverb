@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -1037,4 +1038,26 @@ TEST_CASE("Iterator analysis handles deep loop-carried shader graphs",
     IR::IREmitter entry{fixture.entry};
     entry.WriteGlobal32(Address(entry, Word(entry, 0x310), Word(entry, 0x314)), entry.Imm32(1));
     CHECK(fixture.TrackedOffsets() == std::vector<u32>{0x310});
+}
+
+TEST_CASE("An address offset that doesn't fit 32 bits keeps the access global",
+          "[shader][storage_buffer]") {
+    const auto read = [](u64 imm) {
+        KernelProgram fixture;
+        IR::IREmitter ir{fixture.entry};
+        const IR::U64 address{
+            ir.IAdd(Address(ir, Word(ir, 0x310), Word(ir, 0x314)), ir.Imm64(imm))};
+        static_cast<void>(ir.LoadGlobal32(address));
+        const std::vector<u32> offsets{fixture.TrackedOffsets()};
+        const bool global{std::ranges::any_of(fixture.entry.Instructions(), [](const auto& inst) {
+            return inst.GetOpcode() == IR::Opcode::LoadGlobal32;
+        })};
+        return std::pair{offsets, global};
+    };
+    // Offsets an s32 holds, positive and negative, are taken as before.
+    CHECK(read(0x10) == std::pair{std::vector<u32>{0x310}, false});
+    CHECK(read(~u64{0xf}) == std::pair{std::vector<u32>{0x310}, false});
+    // 4 GiB + 0x10 is not 0x10, and 2 GiB is not -2 GiB.
+    CHECK(read(0x1'0000'0010ULL) == std::pair{std::vector<u32>{}, true});
+    CHECK(read(0x8000'0000ULL) == std::pair{std::vector<u32>{}, true});
 }
