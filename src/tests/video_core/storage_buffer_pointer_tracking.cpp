@@ -1040,6 +1040,33 @@ TEST_CASE("Iterator analysis handles deep loop-carried shader graphs",
     CHECK(fixture.TrackedOffsets() == std::vector<u32>{0x310});
 }
 
+TEST_CASE("Native reads through a loaded pointer whose holder the program writes stay global",
+          "[shader][storage_buffer]") {
+    LoadedPointerRecords records;
+    IR::IREmitter ir{records.fixture.entry};
+    IR::U32 high;
+    const IR::U32 low{records.LoadedLow(ir, high)};
+    ir.SetReg(IR::Reg::R0,
+              ir.LoadGlobal32(Address(ir, ir.IAdd(low, LoadedPointerRecords::RecordOffset(ir)),
+                                      high)));
+    // A store to the buffer that holds the pointer, after the read: what the read loads can then
+    // be another pointer than the one bound for the dispatch.
+    ir.WriteGlobal32(Address(ir, Word(ir, 0x30), Word(ir, 0x34)), ir.Imm32(0));
+    records.fixture.TrackedOffsets();
+
+    CHECK_FALSE(ReadsFromLoadedPointer(records, low));
+    CHECK(records.Count(IR::Opcode::LoadGlobal32) == 1);
+    // The bindings it is routed among at run time stay: the pointer's and its written holder.
+    const auto& descriptors{records.fixture.program.info.storage_buffers_descriptors};
+    CHECK(std::ranges::any_of(descriptors, [](const auto& desc) {
+        return desc.cbuf_offset == 0x30 && desc.indirect_offset == 0;
+    }));
+    CHECK(std::ranges::any_of(descriptors, [](const auto& desc) {
+        return desc.cbuf_offset == 0x30 && desc.indirect_offset == ~0U && desc.is_written;
+    }));
+    CHECK(records.fixture.program.info.native_global_bounds);
+}
+
 TEST_CASE("An address offset that doesn't fit 32 bits keeps the access global",
           "[shader][storage_buffer]") {
     const auto read = [](u64 imm) {

@@ -1743,7 +1743,8 @@ bool CollectStorageBuffers(IR::Block& block, IR::Inst& inst, StorageInfo& info, 
             // of a 5 ms pass at 2x on an RTX 3070).
             // As when the access stayed global: the accesses through this pointer that still do
             // (atomics, stores) route among the program's buffers at run time, the pointer's
-            // holder included.
+            // holder included. The read stays global after all when the program writes that
+            // holder (see GlobalMemoryToStorageBufferPass).
             info.set.insert(candidates.front());
             info.set.insert(StorageBufferAddr{.index = candidates.front().index,
                                               .offset = candidates.front().offset});
@@ -2557,6 +2558,20 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
         throw NotImplementedException("Binding {} storage buffers to a stage that binds {}",
                                       info.set.size(), max_ssbos);
     }
+    // A read rebased on a pointer loaded from memory reads the binding of the pointer the buffer
+    // holding it had when the draw or dispatch was bound. Where the program writes that holder,
+    // what the read loads can be another pointer: those reads stay global, routed at run time
+    // among the bindings collected for them (the pointer's and its holder's).
+    info.to_replace.erase(
+        std::remove_if(info.to_replace.begin(), info.to_replace.end(),
+                       [&info](const StorageInst& storage_inst) {
+                           return !storage_inst.loaded_pointer.IsEmpty() &&
+                                  info.writes.contains(StorageBufferAddr{
+                                      .index = storage_inst.storage_buffer.index,
+                                      .offset = storage_inst.storage_buffer.offset,
+                                  });
+                       }),
+        info.to_replace.end());
     program.info.native_global_bounds |= info.native_runtime_bounds;
     // Store extents, before the accesses are rebased (the analysis reads the guest addresses).
     // None while a store stays global: the backend routes it to the descriptor whose pointer is the
