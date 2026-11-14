@@ -836,6 +836,22 @@ TEST_CASE("Native reads through a loaded pointer take carries only from the low 
         chained.fixture.TrackedOffsets();
         CHECK(ReadsFromLoadedPointer(chained, low));
     }
+    // One addition's carry added twice: the high word is 4 GiB too far when that addition
+    // overflows.
+    LoadedPointerRecords twice;
+    {
+        IR::IREmitter ir{twice.fixture.entry};
+        IR::U32 high;
+        const IR::U32 low{twice.LoadedLow(ir, high)};
+        const IR::U32 address_low{ir.IAdd(low, LoadedPointerRecords::RecordOffset(ir))};
+        const IR::U1 overflow{ir.GetCarryFromOp(address_low)};
+        const IR::U32 carry{ir.Select(overflow, ir.Imm32(1), ir.Imm32(0))};
+        const IR::U32 again{ir.Select(overflow, ir.Imm32(1), ir.Imm32(0))};
+        ir.SetReg(IR::Reg::R0, ir.LoadGlobal32(Address(ir, address_low,
+                                                       ir.IAdd(ir.IAdd(high, carry), again))));
+        twice.fixture.TrackedOffsets();
+        CHECK_FALSE(ReadsFromLoadedPointer(twice, low));
+    }
 }
 
 TEST_CASE("Native reads through a pointer a loop carries read its binding directly",

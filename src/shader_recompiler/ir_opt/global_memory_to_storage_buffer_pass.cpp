@@ -1515,24 +1515,25 @@ bool WalkLoadedPointer(const IR::Value& low_addr, LoadedPointer& result, u32 dep
     return true;
 }
 
-/// Whether a value is the carry out of one of these additions, as 64-bit additions are split:
-/// Select(GetCarryFromOp(add), 1, 0).
-bool IsCarryOf(const IR::Inst& select, std::span<const IR::Inst* const> adds) {
+/// The one of these additions whose carry out a value is, as 64-bit additions are split:
+/// Select(GetCarryFromOp(add), 1, 0). Null when it is no such carry.
+const IR::Inst* CarryOf(const IR::Inst& select, std::span<const IR::Inst* const> adds) {
     const IR::Value condition{select.Arg(0)};
     if (condition.IsImmediate() || !select.Arg(1).IsImmediate() || select.Arg(1).U32() != 1 ||
         !select.Arg(2).IsImmediate() || select.Arg(2).U32() != 0) {
-        return false;
+        return nullptr;
     }
     const IR::Inst* const carry{condition.InstRecursive()};
     if (carry->GetOpcode() != IR::Opcode::GetCarryFromOp || carry->Arg(0).IsImmediate()) {
-        return false;
+        return nullptr;
     }
-    return std::ranges::find(adds, carry->Arg(0).InstRecursive()) != adds.end();
+    const auto add{std::ranges::find(adds, carry->Arg(0).InstRecursive())};
+    return add != adds.end() ? *add : nullptr;
 }
 
 /// Whether an address's high word is the high word of the pointer its low word was built from
-/// (pointer.low), plus carries out of the additions that add up the low word from it, and nothing
-/// else.
+/// (pointer.low), plus carries out of the additions that add up the low word from it (each at most
+/// once), and nothing else.
 bool HighFromLoadedPointer(const IR::Value& high, const LoadedPointer& pointer) {
     const IR::Inst* const load{pointer.low.InstRecursive()->Arg(0).InstRecursive()};
     // Whether the low word's null phi takes zero from a predecessor.
@@ -1547,6 +1548,7 @@ bool HighFromLoadedPointer(const IR::Value& high, const LoadedPointer& pointer) 
     };
     bool found{};
     bool high_null{};
+    small_vector<const IR::Inst*, 8> carried; // the additions whose carries were added
     small_vector<IR::Value, 8> pending{high};
     while (!pending.empty()) {
         const IR::Value value{pending.back()};
@@ -1630,12 +1632,16 @@ bool HighFromLoadedPointer(const IR::Value& high, const LoadedPointer& pointer) 
             }
             break;
         }
-        case IR::Opcode::SelectU32:
-            // The carry out of one of the low word's additions: Select(GetCarryFromOp(add), 1, 0)
-            if (!IsCarryOf(*inst, pointer.adds)) {
+        case IR::Opcode::SelectU32: {
+            // The carry out of one of the low word's additions: Select(GetCarryFromOp(add), 1, 0),
+            // once per addition (another of the same carry moves the address by 4 GiB)
+            const IR::Inst* const add{CarryOf(*inst, pointer.adds)};
+            if (add == nullptr || std::ranges::find(carried, add) != carried.end()) {
                 return false;
             }
+            carried.push_back(add);
             break;
+        }
         default:
             // Anything else added to the high word isn't proven to be a carry
             return false;
